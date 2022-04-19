@@ -81,6 +81,7 @@ func (d *Driver) updateWritableConfig(rawWritableConfig interface{}) {
 		d.Logger.Error("unable to update writable config: Cannot cast raw config to type 'WritableInfo'")
 		return
 	}
+	d.Logger.Debugf("OPCUAServer.Writable updated. Start Subscriber")
 
 	d.cleanup()
 
@@ -94,6 +95,9 @@ func (d *Driver) startSubscriber() {
 	err := d.startSubscriptionListener()
 	if err != nil {
 		d.Logger.Errorf("Driver.Initialize: Start incoming data Listener failed: %v", err)
+		//cleanup and restart listener
+		d.cleanup()
+		go d.startSubscriber()
 	}
 }
 

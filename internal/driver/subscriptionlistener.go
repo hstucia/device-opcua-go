@@ -10,7 +10,9 @@ package driver
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -22,6 +24,7 @@ import (
 	"github.com/gopcua/opcua/ua"
 )
 
+// see example https://github.com/gopcua/opcua/blob/main/examples/subscribe/subscribe.go
 func (d *Driver) startSubscriptionListener() error {
 
 	var (
@@ -50,7 +53,7 @@ func (d *Driver) startSubscriptionListener() error {
 		return err
 	}
 
-	client, err := d.getClient(device)
+	client, err := d.getClient(ctx, device)
 	if err != nil {
 		return err
 	}
@@ -61,43 +64,59 @@ func (d *Driver) startSubscriptionListener() error {
 	}
 	defer client.Close()
 
+	notifyCh := make(chan *opcua.PublishNotificationData)
 	sub, err := client.Subscribe(
 		&opcua.SubscriptionParameters{
 			Interval: time.Duration(500) * time.Millisecond,
-		}, make(chan *opcua.PublishNotificationData))
+		}, notifyCh)
 	if err != nil {
 		return err
 	}
-	defer sub.Cancel()
+	defer sub.Cancel(ctx)
 
 	if err := d.configureMonitoredItems(sub, resources, deviceName); err != nil {
 		return err
 	}
 
-	go sub.Run(ctx) // start Publish loop
+	// no longer need with opcua-go 0.3.3
+	//go sub.Run(ctx) // start Publish loop
 
 	// read from subscription's notification channel until ctx is cancelled
 	for {
 		select {
 		// context return
 		case <-ctx.Done():
-			return nil
+			d.Logger.Warn("Opcua Ctx Cancelled")
+			return ctx.Err()
 			// receive Publish Notification Data
-		case res := <-sub.Notifs:
+		case res := <-notifyCh:
 			if res.Error != nil {
 				d.Logger.Debug(res.Error.Error())
+				d.Logger.Debugf("Error Type is %T", res.Error)
+				// in case of "broken pipe" Error Type is *net.OpError
+				if (errors.Is(res.Error, &net.OpError{})) {
+					opErr := res.Error.(*net.OpError)
+					d.Logger.Errorf("OPError: %s", opErr.Error())
+					// we should not continue. Error is unrecoverable
+					return res.Error
+				}
 				continue
 			}
 			switch x := res.Value.(type) {
 			// result type: DateChange StatusChange
 			case *ua.DataChangeNotification:
 				d.handleDataChange(x)
+			case *ua.EventNotificationList:
+				// do nothing
+				d.Logger.Infof("Event Notification %s", res.Value)
+			default:
+				d.Logger.Warnf("what's this publish result? %T", res.Value)
 			}
 		}
 	}
 }
 
-func (d *Driver) getClient(device models.Device) (*opcua.Client, error) {
+func (d *Driver) getClient(ctx context.Context, device models.Device) (*opcua.Client, error) {
 	var (
 		policy   = d.serviceConfig.OPCUAServer.Policy
 		mode     = d.serviceConfig.OPCUAServer.Mode
@@ -110,7 +129,7 @@ func (d *Driver) getClient(device models.Device) (*opcua.Client, error) {
 		return nil, xerr
 	}
 
-	endpoints, err := opcua.GetEndpoints(endpoint)
+	endpoints, err := opcua.GetEndpoints(ctx, endpoint)
 	if err != nil {
 		return nil, err
 	}
